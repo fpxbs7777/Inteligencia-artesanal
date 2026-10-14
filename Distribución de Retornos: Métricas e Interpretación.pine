@@ -1,0 +1,169 @@
+//@version=5
+indicator("Distribución de Retornos: Métricas e Interpretación", shorttitle="DistStats", overlay=true, max_bars_back=5000)
+
+// ============ INPUTS ============
+lookback   = input.int(252, "Ventana (barras)", minval=30, maxval=5000)
+factor     = input.int(252, "Factor de anualización", minval=1, tooltip="252 diario, 52 semanal, 12 mensual")
+invest     = input.float(10000, "Monto a invertir", minval=0)
+sharpeMin  = input.float(1.0, "Sharpe mínimo (diagnóstico)", step=0.1)
+volMax     = input.float(0.20, "Volatilidad máx. (diagnóstico)", step=0.01)
+varMax     = input.float(0.20, "Pérdida VaR máx. aceptada", step=0.01)
+tblPos     = input.string("Top Right", "Posición tabla", options=["Top Right", "Top Left", "Bottom Right", "Bottom Left"])
+showTable  = input.bool(true, "Mostrar tabla")
+
+// ============ RETORNOS ============
+ret = close / close[1] - 1
+
+// ============ ESTADÍSTICAS EN VENTANA ============
+n = lookback
+meanD = ta.sma(ret, n)
+stdD  = ta.stdev(ret, n)          // desvío poblacional, igual que np.std
+meanAnn = meanD * factor
+volAnn  = stdD * math.sqrt(factor)
+sharpe  = volAnn > 0 ? meanAnn / volAnn : 0.0
+
+// VaR 95% (percentil 5 de los retornos)
+var95 = ta.percentile_linear_interpolation(ret, n, 5) 
+
+// Asimetría y curtosis (exceso, como scipy.stats.kurtosis)
+m3 = 0.0
+m4 = 0.0
+posSum = 0.0
+posCnt = 0
+negSum = 0.0
+negCnt = 0
+maxRet = -1e10
+for i = 0 to n - 1
+    r = nz(ret[i])
+    d = r - meanD
+    m3 += math.pow(d, 3)
+    m4 += math.pow(d, 4)
+    if r > 0
+        posSum += r
+        posCnt += 1
+    if r < 0
+        negSum += r
+        negCnt += 1
+    maxRet := math.max(maxRet, r)
+
+m3 /= n
+m4 /= n
+skew = stdD > 0 ? m3 / math.pow(stdD, 3) : 0.0
+kurt = stdD > 0 ? m4 / math.pow(stdD, 4) - 3 : 0.0
+
+// Jarque-Bera y p-value (chi2 con 2 gl: p = exp(-JB/2))
+jb = n / 6.0 * (math.pow(skew, 2) + math.pow(kurt, 2) / 4.0)
+pVal = math.exp(-jb / 2.0)
+isNormal = pVal > 0.05
+
+// Escenarios por unidad de activo
+avgPos = posCnt > 0 ? posSum / posCnt : 0.0
+avgNeg = negCnt > 0 ? negSum / negCnt : 0.0
+medRet = ta.percentile_nearest_rank(ret, n, 50)
+
+maxLoss  = close * var95
+expLoss  = close * avgNeg
+expGain  = close * avgPos
+maxGain  = close * maxRet
+probable = close * medRet
+
+// Escenario sobre el monto invertido
+mostProbInv = invest * medRet
+
+// ============ DIAGNÓSTICO ============
+favorable = meanAnn > 0 and sharpe > sharpeMin and volAnn < volMax and var95 > -varMax
+
+// ============ INTERPRETACIONES ============
+f2(x) => str.tostring(x, "#.##")
+f4(x) => str.tostring(x, "#.####")
+pct(x) => str.tostring(x * 100, "#.##") + "%"
+
+intMean   = meanAnn > 0 ? "Retorno esperado anual positivo" : "Retorno esperado anual negativo"
+intVol    = volAnn < 0.2 ? "Riesgo bajo" : volAnn < 0.5 ? "Riesgo medio" : "Riesgo alto"
+intSharpe = sharpe > 1 ? "Bueno ajustado por riesgo" : sharpe > 0 ? "Bajo ajustado por riesgo" : "Negativo"
+intVar    = "5% de días peor que " + pct(var95)
+intSkew   = skew > 0 ? "Cola hacia ganancias altas" : "Cola hacia pérdidas altas"
+intKurt   = kurt > 0 ? "Colas gruesas: eventos extremos" : "Colas finas"
+intJB     = isNormal ? "No se rechaza normalidad" : "No es normal (p<0,05)"
+
+// ============ TABLA ============
+tPos = switch tblPos
+    "Top Right"    => position.top_right
+    "Top Left"     => position.top_left
+    "Bottom Right" => position.bottom_right
+    => position.bottom_left
+
+var table t = table.new(tPos, 3, 16, border_width=1, frame_color=color.gray, frame_width=1)
+
+hdrBg = color.new(color.blue, 20)
+rowBg = color.new(color.black, 15)
+good  = color.new(color.green, 30)
+bad   = color.new(color.red, 30)
+
+if showTable and barstate.islast
+    table.cell(t, 0, 0, syminfo.ticker + " | " + str.tostring(n) + " barras", text_color=color.white, bgcolor=hdrBg, text_size=size.small)
+    table.cell(t, 1, 0, "Valor", text_color=color.white, bgcolor=hdrBg, text_size=size.small)
+    table.cell(t, 2, 0, "Interpretación", text_color=color.white, bgcolor=hdrBg, text_size=size.small)
+
+    table.cell(t, 0, 1, "Precio actual", text_color=color.white, bgcolor=rowBg, text_size=size.small)
+    table.cell(t, 1, 1, f2(close), text_color=color.white, bgcolor=rowBg, text_size=size.small)
+    table.cell(t, 2, 1, "Último cierre", text_color=color.white, bgcolor=rowBg, text_size=size.small)
+
+    table.cell(t, 0, 2, "Media anualizada", text_color=color.white, bgcolor=rowBg, text_size=size.small)
+    table.cell(t, 1, 2, pct(meanAnn), text_color=color.white, bgcolor=meanAnn > 0 ? good : bad, text_size=size.small)
+    table.cell(t, 2, 2, intMean, text_color=color.white, bgcolor=rowBg, text_size=size.small)
+
+    table.cell(t, 0, 3, "Volatilidad anual", text_color=color.white, bgcolor=rowBg, text_size=size.small)
+    table.cell(t, 1, 3, pct(volAnn), text_color=color.white, bgcolor=volAnn < volMax ? good : bad, text_size=size.small)
+    table.cell(t, 2, 3, intVol, text_color=color.white, bgcolor=rowBg, text_size=size.small)
+
+    table.cell(t, 0, 4, "Sharpe", text_color=color.white, bgcolor=rowBg, text_size=size.small)
+    table.cell(t, 1, 4, f2(sharpe), text_color=color.white, bgcolor=sharpe > sharpeMin ? good : bad, text_size=size.small)
+    table.cell(t, 2, 4, intSharpe, text_color=color.white, bgcolor=rowBg, text_size=size.small)
+
+    table.cell(t, 0, 5, "VaR 95% (diario)", text_color=color.white, bgcolor=rowBg, text_size=size.small)
+    table.cell(t, 1, 5, pct(var95), text_color=color.white, bgcolor=var95 > -varMax ? good : bad, text_size=size.small)
+    table.cell(t, 2, 5, intVar, text_color=color.white, bgcolor=rowBg, text_size=size.small)
+
+    table.cell(t, 0, 6, "Skewness", text_color=color.white, bgcolor=rowBg, text_size=size.small)
+    table.cell(t, 1, 6, f2(skew), text_color=color.white, bgcolor=rowBg, text_size=size.small)
+    table.cell(t, 2, 6, intSkew, text_color=color.white, bgcolor=rowBg, text_size=size.small)
+
+    table.cell(t, 0, 7, "Kurtosis (exceso)", text_color=color.white, bgcolor=rowBg, text_size=size.small)
+    table.cell(t, 1, 7, f2(kurt), text_color=color.white, bgcolor=rowBg, text_size=size.small)
+    table.cell(t, 2, 7, intKurt, text_color=color.white, bgcolor=rowBg, text_size=size.small)
+
+    table.cell(t, 0, 8, "Jarque-Bera / p", text_color=color.white, bgcolor=rowBg, text_size=size.small)
+    table.cell(t, 1, 8, f2(jb) + " / " + f4(pVal), text_color=color.white, bgcolor=isNormal ? good : bad, text_size=size.small)
+    table.cell(t, 2, 8, intJB, text_color=color.white, bgcolor=rowBg, text_size=size.small)
+
+    table.cell(t, 0, 9, "Pérdida máxima (VaR)", text_color=color.white, bgcolor=rowBg, text_size=size.small)
+    table.cell(t, 1, 9, f2(maxLoss), text_color=color.white, bgcolor=rowBg, text_size=size.small)
+    table.cell(t, 2, 9, "Por unidad, 5% peor caso diario", text_color=color.white, bgcolor=rowBg, text_size=size.small)
+
+    table.cell(t, 0, 10, "Pérdida esperada", text_color=color.white, bgcolor=rowBg, text_size=size.small)
+    table.cell(t, 1, 10, f2(expLoss), text_color=color.white, bgcolor=rowBg, text_size=size.small)
+    table.cell(t, 2, 10, "Promedio de días negativos", text_color=color.white, bgcolor=rowBg, text_size=size.small)
+
+    table.cell(t, 0, 11, "Ganancia esperada", text_color=color.white, bgcolor=rowBg, text_size=size.small)
+    table.cell(t, 1, 11, f2(expGain), text_color=color.white, bgcolor=rowBg, text_size=size.small)
+    table.cell(t, 2, 11, "Promedio de días positivos", text_color=color.white, bgcolor=rowBg, text_size=size.small)
+
+    table.cell(t, 0, 12, "Ganancia máxima", text_color=color.white, bgcolor=rowBg, text_size=size.small)
+    table.cell(t, 1, 12, f2(maxGain), text_color=color.white, bgcolor=rowBg, text_size=size.small)
+    table.cell(t, 2, 12, "Mejor día de la ventana", text_color=color.white, bgcolor=rowBg, text_size=size.small)
+
+    table.cell(t, 0, 13, "Escenario más probable", text_color=color.white, bgcolor=rowBg, text_size=size.small)
+    table.cell(t, 1, 13, f2(probable), text_color=color.white, bgcolor=rowBg, text_size=size.small)
+    table.cell(t, 2, 13, "Mediana diaria. Sobre monto: " + f2(mostProbInv), text_color=color.white, bgcolor=rowBg, text_size=size.small)
+
+    table.cell(t, 0, 14, "Diagnóstico", text_color=color.white, bgcolor=favorable ? good : bad, text_size=size.small)
+    table.cell(t, 1, 14, favorable ? "FAVORABLE" : "NO FAVORABLE", text_color=color.white, bgcolor=favorable ? good : bad, text_size=size.small)
+    table.cell(t, 2, 14, "Media>0, Sharpe, Vol y VaR dentro de límites", text_color=color.white, bgcolor=rowBg, text_size=size.small)
+
+    table.cell(t, 0, 15, "Aviso", text_color=color.gray, bgcolor=rowBg, text_size=size.tiny)
+    table.cell(t, 1, 15, "", bgcolor=rowBg)
+    table.cell(t, 2, 15, "Estadística histórica, no proyección", text_color=color.gray, bgcolor=rowBg, text_size=size.tiny)
+
+// ============ PLOT AUXILIAR (VaR en el gráfico) ============
+plot(close * (1 + var95), "Nivel VaR 95% (1 día)", color=color.new(color.red, 50), style=plot.style_circles)
